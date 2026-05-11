@@ -1,84 +1,62 @@
-import os
-import json
-import math
-import time
-import threading
-import websocket
+import os, time, threading, websocket, json, sys, math
 from fastapi import FastAPI
 import uvicorn
-import sys
+
+# Fonction de log ultra-agressive pour forcer l'affichage sur Railway
+def log(msg):
+    print(f"DEBUG_BOT: {msg}", flush=True)
+    sys.stdout.flush()
 
 app = FastAPI()
 DATA_FILE = "crash_history.csv"
 
-# Forcer l'affichage des logs
-def log(msg):
-    print(msg, flush=True)
-    sys.stdout.flush()
-
+# Initialisation du fichier CSV
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w") as f:
         f.write("timestamp,multiplier,flight_time_ms\n")
-
-def save_data(multiplier):
-    try:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        ms = round(math.log(float(multiplier)) / 0.00006) if float(multiplier) > 1 else 0
-        with open(DATA_FILE, "a") as f:
-            f.write(f"{ts},{multiplier},{ms}\n")
-        log(f"✅ CRASH : {multiplier}x")
-    except Exception as e:
-        log(f"❌ Erreur save: {e}")
-
-def on_message(ws, message):
-    try:
-        payload = json.loads(message)
-        if payload.get("type") == "f":
-            data = payload.get("data", {})
-            m, s = data.get("m"), data.get("s")
-            if s == "c" and m:
-                save_data(m)
-    except:
-        pass
+    log("Fichier CSV créé.")
 
 def run_ws():
     url = os.getenv("WS_URL")
     if not url:
-        log("❌ WS_URL MANQUANT")
+        log("ERREUR CRITIQUE: La variable WS_URL n'est pas configurée dans Railway !")
         return
+    
+    log(f"Connexion WebSocket lancée sur : {url[:20]}...")
+    
+    def on_message(ws, message):
+        try:
+            data = json.loads(message)
+            if data.get("type") == "f":
+                res = data.get("data", {})
+                if res.get("s") == "c": # Crash
+                    m = res.get("m", 1.0)
+                    ms = round(math.log(float(m)) / 0.00006) if float(m) > 1 else 0
+                    with open(DATA_FILE, "a") as f:
+                        f.write(f"{time.ctime()},{m},{ms}\n")
+                    log(f"MATCH ENREGISTRÉ : {m}x")
+        except Exception as e:
+            pass
 
-    # On active le mode debug pour voir TOUT dans Railway
-    websocket.enableTrace(True)
+    # Déguisement pour éviter le blocage casino
+    headers = {"User-Agent": "Mozilla/5.0 (Android 10; Mobile; rv:114.0) Gecko/114.0 Firefox/114.0"}
     
-    # Extraction de l'origine (ex: https://monsite.com)
-    # Très important pour que le casino accepte la connexion
-    origin = url.replace("wss://", "https://").split("/")[0]
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/114.0.0.0 Mobile Safari/537.36",
-        "Origin": origin
-    }
-
-    log(f"🚀 CONNEXION EN COURS SUR : {url[:30]}...")
-    
-    ws = websocket.WebSocketApp(
-        url,
-        header=headers,
-        on_message=on_message,
-        on_error=lambda ws, e: log(f"🚨 ERR: {e}"),
-        on_close=lambda ws, c, m: log("🔌 FERMÉ")
-    )
+    ws = websocket.WebSocketApp(url, header=headers, on_message=on_message)
     ws.run_forever()
 
+# --- C'EST ICI QUE CA SE JOUE POUR RAILWAY ---
+@app.on_event("startup")
+def startup_event():
+    log("Le serveur Railway démarre... Lancement du thread WebSocket.")
+    thread = threading.Thread(target=run_ws)
+    thread.daemon = True
+    thread.start()
+    log("Thread WebSocket activé avec succès.")
+
 @app.get("/")
-def home():
+def read_root():
     lines = 0
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
             lines = len(f.readlines()) - 1
-    return {"status": "online", "recolte": lines}
-
-if __name__ == "__main__":
-    threading.Thread(target=run_ws, daemon=True).start()
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    return {"status": "OK", "recolte_actuelle": lines, "message": "Si 'recolte' est à 0, vérifie tes logs Railway."}
